@@ -5,6 +5,7 @@ from pymongo import MongoClient
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
+from flask import Flask, request
 
 # --- CONFIGURATION ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -161,4 +162,4 @@ def finalize_reject(message, u_id, admin_id):
 # --- APScheduler Job ---
 def kick_expired_users():
     now = datetime.now().timestamp()
-    expired_users = users_col.find({"expiry": {"$lt
+    expired_users = users_col
