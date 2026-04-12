@@ -8,15 +8,45 @@ import atexit
 from flask import Flask, request
 
 # --- CONFIGURATION ---
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-MONGO_URI = os.getenv('MONGO_URI')
-UPI_ID = os.getenv('UPI_ID')
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI")
+UPI_ID = os.getenv("UPI_ID")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 client = MongoClient(MONGO_URI)
 db = client['sub_management']
 channels_col = db['channels']
 users_col = db['users']
+
+# --- APScheduler Job ---
+def kick_expired_users():
+    now = datetime.now().timestamp()
+    expired_users = users_col.find({"expiry": {"$lt": now}})
+    for user in expired_users:
+        try:
+            bot.kick_chat_member(user['channel_id'], user['user_id'])
+            bot.send_message(user['user_id'], "⚠️ Your subscription has expired. Please renew.")
+            users_col.delete_one({"_id": user["_id"]})
+        except Exception as e:
+            print(f"Error kicking user {user['user_id']}: {e}")
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(kick_expired_users, 'interval', minutes=1)
+scheduler.start()
+atexit.register(lambda: scheduler.shutdown(wait=False))
+
+# --- Flask app for webhook ---
+app = Flask(__name__)
+
+@app.route('/' + BOT_TOKEN, methods=['POST'])
+def webhook():
+    update = telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
+    bot.process_new_updates([update])
+    return "OK", 200
+
+@app.route('/')
+def index():
+    return "Bot is running", 200
 
 # --- START HANDLER ---
 @bot.message_handler(commands=['start'])
@@ -63,15 +93,10 @@ def get_plans(message):
         bot.send_message(message.chat.id, "❌ Error: Message was not forwarded. Use /add again.")
 
 def finalize_channel(message, ch_id, ch_name, admin_id):
-    try:
-        raw_prices = message.text.split(',')
-        plans_dict = {}
-        for idx, pr in enumerate(raw_prices, start=1):
-            plans_dict[str(idx)] = pr.strip()
-        msg = bot.send_message(admin_id, "Enter your contact username (without @):")
-        bot.register_next_step_handler(msg, save_channel, ch_id, ch_name, plans_dict, admin_id)
-    except:
-        bot.send_message(admin_id, "❌ Invalid format. Use /add to retry.")
+    raw_prices = message.text.split(',')
+    plans_dict = {str(idx): pr.strip() for idx, pr in enumerate(raw_prices, start=1)}
+    msg = bot.send_message(admin_id, "Enter your contact username (without @):")
+    bot.register_next_step_handler(msg, save_channel, ch_id, ch_name, plans_dict, admin_id)
 
 def save_channel(message, ch_id, ch_name, plans_dict, admin_id):
     contact_username = message.text.strip().lstrip('@')
@@ -145,21 +170,4 @@ def finalize_approval(message, u_id, ch_id, admin_id):
         bot.send_message(admin_id, f"❌ Error: {e}")
 
 # --- REJECT FLOW ---
-@bot.callback_query_handler(func=lambda call: call.data.startswith('rej_'))
-def reject_now(call):
-    _, u_id, ch_id = call.data.split('_')
-    u_id, ch_id = int(u_id), int(ch_id)
-    ch_data = channels_col.find_one({"channel_id": ch_id})
-    admin_id = ch_data['admin_id']
-    msg = bot.send_message(admin_id, f"Enter rejection reason for user {u_id}:")
-    bot.register_next_step_handler(msg, finalize_reject, u_id, admin_id)
-
-def finalize_reject(message, u_id, admin_id):
-    reason = message.text.strip()
-    bot.send_message(u_id, f"❌ *Payment Rejected*\n\nReason: {reason}\n\nPlease contact the admin if you believe this is a mistake.", parse_mode="Markdown")
-    bot.send_message(admin_id, f"❌ Rejected user {u_id}. Reason: {reason}")
-
-# --- APScheduler Job ---
-def kick_expired_users():
-    now = datetime.now().timestamp()
-    expired_users = users_col
+@bot.callback_query_handler(func=lambda call: call.data.startswith('rej_
