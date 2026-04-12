@@ -20,7 +20,7 @@ def run_web():
 def keep_alive():
     Thread(target=run_web).start()
 
-# --- CONFIGURATION (Environment Variables) ---
+# --- CONFIGURATION ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 MONGO_URI = os.getenv('MONGO_URI')
 ADMIN_ID = int(os.getenv('ADMIN_ID'))
@@ -72,79 +72,7 @@ def start_handler(message):
         bot.send_message(message.chat.id,
             "Welcome! To join a channel, please use the link provided by the Admin.")
 
-@bot.message_handler(commands=['channels'], func=lambda m: m.from_user.id == ADMIN_ID)
-def list_channels(message):
-    markup = InlineKeyboardMarkup()
-    cursor = channels_col.find({"admin_id": ADMIN_ID})
-    count = 0
-    for ch in cursor:
-        markup.add(InlineKeyboardButton(
-            f"Channel: {ch['name']}",
-            callback_data=f"manage_{ch['channel_id']}"
-        ))
-        count += 1
-    markup.add(InlineKeyboardButton("➕ Add New Channel", callback_data="add_new"))
-    if count == 0:
-        bot.send_message(ADMIN_ID, "No channels found. Click below to add one.", reply_markup=markup)
-    else:
-        bot.send_message(ADMIN_ID, "Your Managed Channels:", reply_markup=markup)
-
-@bot.message_handler(commands=['add'], func=lambda m: m.from_user.id == ADMIN_ID)
-def add_channel_start(message):
-    msg = bot.send_message(ADMIN_ID,
-        "Please ensure the bot is an Admin in your channel, then FORWARD any message from that channel here.")
-    bot.register_next_step_handler(msg, get_plans)
-
-@bot.callback_query_handler(func=lambda call: call.data == "add_new")
-def cb_add_new(call):
-    bot.answer_callback_query(call.id)
-    msg = bot.send_message(ADMIN_ID, "Please FORWARD any message from your channel here.")
-    bot.register_next_step_handler(msg, get_plans)
-
-def get_plans(message):
-    if message.forward_from_chat:
-        ch_id = message.forward_from_chat.id
-        ch_name = message.forward_from_chat.title
-        msg = bot.send_message(ADMIN_ID,
-            f"Channel Detected: *{ch_name}*\n\nEnter plans in format (Minutes:Price):\n`Min:Price, Min:Price`\n\n"
-            "Example:\n`1440:99, 43200:199` (1 Day and 30 Days)",
-            parse_mode="Markdown")
-        bot.register_next_step_handler(msg, finalize_channel, ch_id, ch_name)
-    else:
-        bot.send_message(ADMIN_ID, "❌ Error: Message was not forwarded. Use /add to try again.")
-
-def finalize_channel(message, ch_id, ch_name):
-    try:
-        raw_plans = message.text.split(',')
-        plans_dict = {}
-        for p in raw_plans:
-            t, pr = p.strip().split(':')
-            plans_dict[t] = pr
-        msg = bot.send_message(ADMIN_ID, "Enter contact username for this channel (without @):")
-        bot.register_next_step_handler(msg, save_channel, ch_id, ch_name, plans_dict)
-    except:
-        bot.send_message(ADMIN_ID, "❌ Invalid format. Please use `Min:Price, Min:Price`. Use /add to retry.")
-
-def save_channel(message, ch_id, ch_name, plans_dict):
-    contact_username = message.text.strip().replace('@','')
-    channels_col.update_one(
-        {"channel_id": ch_id},
-        {"$set": {
-            "name": ch_name,
-            "plans": plans_dict,
-            "admin_id": ADMIN_ID,
-            "contact_username": contact_username
-        }},
-        upsert=True
-    )
-    bot_username = bot.get_me().username
-    bot.send_message(
-        ADMIN_ID,
-        f"✅ Setup Successful!\n\nInvite Link for users:\n`https://t.me/{bot_username}?start={ch_id}`",
-        parse_mode="Markdown"
-    )
-
-# --- USER: PAYMENT FLOW ---
+# --- PAYMENT FLOW ---
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('select_'))
 def user_pays(call):
@@ -201,4 +129,52 @@ def approve_now(call):
             upsert=True
         )
         bot.send_message(
-            u_id
+            u_id,
+            f"🥳 *Payment Approved!*\n\n"
+            f"Subscription: {mins} Minutes\n\n"
+            f"Join Link: {link.invite_link}\n\n"
+            f"⚠️ Note: This link and your access will expire in {mins} minutes.",
+            parse_mode="Markdown"
+        )
+        bot.edit_message_text(
+            f"✅ Approved user {u_id} for {mins} mins.",
+            call.message.chat.id,
+            call.message.message_id
+        )
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ Error: {e}")
+
+# --- EXPIRY JOB ---
+
+def kick_expired_users():
+    now = datetime.now().timestamp()
+    expired_users = users_col.find({"expiry": {"$lte": now}})
+    bot_username = bot.get_me().username
+    for user in expired_users:
+        try:
+            bot.ban_chat_member(user['channel_id'], user['user_id'])
+            bot.unban_chat_member(user['channel_id'], user['user_id'])
+            rejoin_url = f"https://t.me/{bot_username}?start={user['channel_id']}"
+            markup = InlineKeyboardMarkup().add(
+                InlineKeyboardButton("🔄 Re-join / Renew", url=rejoin_url)
+            )
+            bot.send_message(
+                user['user_id'],
+                "⚠️ Your subscription has expired.\n\nTo join again or renew, please click the button below:",
+                reply_markup=markup
+            )
+            users_col.delete_one({"_id": user['_id']})
+        except Exception as e:
+            print(f"Error kicking user {user['user_id']}: {e}")
+
+# --- STARTUP ---
+if __name__ == '__main__':
+    keep_alive()
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(kick_expired_users, 'interval', minutes=1)
+    scheduler.start()
+    atexit.register(lambda: scheduler.shutdown(wait=False))
+
+    bot.remove_webhook()
+    print("Bot is running...")
+    bot.infinity_polling(timeout=20, long_polling_timeout=10)
