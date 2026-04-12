@@ -203,5 +203,4 @@ def approve_now(call):
         bot.send_message(
             u_id,
             f"🥳 *Payment Approved!*\n\n"
-            f"Subscription: {mins} Minutes\n\n"
-            f
+            f"
