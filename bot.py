@@ -1,8 +1,3 @@
-Got it — the repeated `unterminated f‑string` and `(` never closed errors are happening because your file keeps getting cut off mid‑function. Let’s fix this once and for all by giving you a **complete, ready‑to‑run bot.py** with all handlers, approval flow, expiry logic, and startup block fully closed and syntactically correct.
-
-Here’s the **full corrected script**:
-
-```python
 import os
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
