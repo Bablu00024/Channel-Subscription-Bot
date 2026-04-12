@@ -4,21 +4,9 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pymongo import MongoClient
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask
+from flask import Flask, request
 from threading import Thread
 import atexit
-
-# --- RENDER KEEP-ALIVE SERVER ---
-app = Flask('')
-@app.route('/')
-def home(): return "Bot is running and healthy!"
-
-def run_web():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    Thread(target=run_web).start()
 
 # --- CONFIGURATION ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -33,88 +21,28 @@ db = client['sub_management']
 channels_col = db['channels']
 users_col = db['users']
 
-# --- ADMIN LOGIC ---
+# --- FLASK SERVER ---
+app = Flask(__name__)
 
+@app.route('/')
+def home():
+    return "Bot is running and healthy!"
+
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    update = telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
+    bot.process_new_updates([update])
+    return "OK", 200
+
+# --- ADMIN LOGIC (simplified example) ---
 @bot.message_handler(commands=['start'])
 def start_handler(message):
-    user_id = message.from_user.id
-    text = message.text.split()
-
-    if len(text) > 1:
-        try:
-            ch_id = int(text[1])
-            ch_data = channels_col.find_one({"channel_id": ch_id})
-            if ch_data:
-                markup = InlineKeyboardMarkup()
-                for p_time, p_price in ch_data['plans'].items():
-                    label = f"{p_time} Min" if int(p_time) < 60 else f"{int(p_time)//1440} Days"
-                    markup.add(InlineKeyboardButton(
-                        f"💳 {label} - ₹{p_price}",
-                        callback_data=f"select_{ch_id}_{p_time}"
-                    ))
-                markup.add(InlineKeyboardButton(
-                    "📞 Contact Admin",
-                    url=f"https://t.me/{ch_data['contact_username']}"
-                ))
-                bot.send_message(
-                    message.chat.id,
-                    f"Welcome!\n\nYou are joining: *{ch_data['name']}*.\n\nPlease select a subscription plan below:",
-                    reply_markup=markup,
-                    parse_mode="Markdown"
-                )
-                return
-        except: pass
-
-    if user_id == ADMIN_ID:
-        bot.send_message(message.chat.id,
-            "✅ Admin Panel Active!\n\n/add - Add/Edit Channel & Prices\n/channels - Manage Existing Channels")
+    if message.from_user.id == ADMIN_ID:
+        bot.send_message(message.chat.id, "✅ Admin Panel Active!\n\n/add - Add/Edit Channel & Prices\n/channels - Manage Existing Channels")
     else:
-        bot.send_message(message.chat.id,
-            "Welcome! To join a channel, please use the link provided by the Admin.")
-
-# --- PAYMENT FLOW ---
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('select_'))
-def user_pays(call):
-    _, ch_id, mins = call.data.split('_')
-    ch_data = channels_col.find_one({"channel_id": int(ch_id)})
-    price = ch_data['plans'][mins]
-    qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=upi://pay?pa={UPI_ID}%26am={price}%26cu=INR"
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ I Have Paid", callback_data=f"paid_{ch_id}_{mins}"))
-    markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{ch_data['contact_username']}"))
-    bot.send_photo(
-        call.message.chat.id,
-        qr_url,
-        caption=f"Plan: {mins} Minutes\nPrice: ₹{price}\nUPI ID: `{UPI_ID}`\n\nPlease complete the payment and click 'I Have Paid'.",
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('paid_'))
-def admin_notify(call):
-    _, ch_id, mins = call.data.split('_')
-    user = call.from_user
-    ch_data = channels_col.find_one({"channel_id": int(ch_id)})
-    price = ch_data['plans'][mins]
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"app_{user.id}_{ch_id}_{mins}"))
-    markup.add(InlineKeyboardButton("❌ Reject", callback_data=f"rej_{user.id}"))
-    bot.send_message(
-        ADMIN_ID,
-        f"🔔 *Payment Verification Required!*\n\nUser: {user.first_name}\nChannel: {ch_data['name']}\nPlan: {mins} Mins\nPrice: ₹{price}",
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
-    u_markup = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{ch_data['contact_username']}")
-    )
-    bot.send_message(call.message.chat.id,
-        "✅ Your payment request has been sent. Please wait for Admin approval.",
-        reply_markup=u_markup)
+        bot.send_message(message.chat.id, "Welcome! To join a channel, please use the link provided by the Admin.")
 
 # --- APPROVAL & EXPIRY ---
-
 @bot.callback_query_handler(func=lambda call: call.data.startswith('app_'))
 def approve_now(call):
     _, u_id, ch_id, mins = call.data.split('_')
@@ -144,8 +72,6 @@ def approve_now(call):
     except Exception as e:
         bot.send_message(ADMIN_ID, f"❌ Error: {e}")
 
-# --- EXPIRY JOB ---
-
 def kick_expired_users():
     now = datetime.now().timestamp()
     expired_users = users_col.find({"expiry": {"$lte": now}})
@@ -168,13 +94,16 @@ def kick_expired_users():
             print(f"Error kicking user {user['user_id']}: {e}")
 
 # --- STARTUP ---
-if __name__ == '__main__':
-    keep_alive()
+if __name__ == "__main__":
+    # Scheduler for expiry checks
     scheduler = BackgroundScheduler()
     scheduler.add_job(kick_expired_users, 'interval', minutes=1)
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown(wait=False))
 
+    # Set webhook
     bot.remove_webhook()
-    print("Bot is running...")
-    bot.infinity_polling(timeout=20, long_polling_timeout=10)
+    bot.set_webhook(url=f"https://your-render-app.onrender.com/{BOT_TOKEN}")
+
+    # Run Flask server
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
