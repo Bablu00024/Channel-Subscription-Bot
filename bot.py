@@ -1,11 +1,12 @@
 import os
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
 from pymongo import MongoClient
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
 from threading import Thread
+import atexit
 
 # --- RENDER KEEP-ALIVE SERVER ---
 app = Flask('')
@@ -45,14 +46,12 @@ def start_handler(message):
             ch_data = channels_col.find_one({"channel_id": ch_id})
             if ch_data:
                 markup = InlineKeyboardMarkup()
-                # Display Dynamic Plans
                 for p_time, p_price in ch_data['plans'].items():
                     label = f"{p_time} Min" if int(p_time) < 60 else f"{int(p_time)//1440} Days"
                     markup.add(InlineKeyboardButton(
                         f"💳 {label} - ₹{p_price}",
                         callback_data=f"select_{ch_id}_{p_time}"
                     ))
-                
                 markup.add(InlineKeyboardButton(
                     "📞 Contact Admin",
                     url=f"https://t.me/{ch_data['contact_username']}"
@@ -66,7 +65,6 @@ def start_handler(message):
                 return
         except: pass
 
-    # Admin Panel Greeting
     if user_id == ADMIN_ID:
         bot.send_message(message.chat.id,
             "✅ Admin Panel Active!\n\n/add - Add/Edit Channel & Prices\n/channels - Manage Existing Channels")
@@ -85,9 +83,7 @@ def list_channels(message):
             callback_data=f"manage_{ch['channel_id']}"
         ))
         count += 1
-    
     markup.add(InlineKeyboardButton("➕ Add New Channel", callback_data="add_new"))
-    
     if count == 0:
         bot.send_message(ADMIN_ID, "No channels found. Click below to add one.", reply_markup=markup)
     else:
@@ -124,8 +120,6 @@ def finalize_channel(message, ch_id, ch_name):
         for p in raw_plans:
             t, pr = p.strip().split(':')
             plans_dict[t] = pr
-        
-        # Ask for contact username after plans
         msg = bot.send_message(ADMIN_ID, "Enter contact username for this channel (without @):")
         bot.register_next_step_handler(msg, save_channel, ch_id, ch_name, plans_dict)
     except:
@@ -157,13 +151,10 @@ def user_pays(call):
     _, ch_id, mins = call.data.split('_')
     ch_data = channels_col.find_one({"channel_id": int(ch_id)})
     price = ch_data['plans'][mins]
-    
     qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=upi://pay?pa={UPI_ID}%26am={price}%26cu=INR"
-    
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ I Have Paid", callback_data=f"paid_{ch_id}_{mins}"))
     markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{ch_data['contact_username']}"))
-    
     bot.send_photo(
         call.message.chat.id,
         qr_url,
@@ -178,18 +169,15 @@ def admin_notify(call):
     user = call.from_user
     ch_data = channels_col.find_one({"channel_id": int(ch_id)})
     price = ch_data['plans'][mins]
-    
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"app_{user.id}_{ch_id}_{mins}"))
     markup.add(InlineKeyboardButton("❌ Reject", callback_data=f"rej_{user.id}"))
-    
     bot.send_message(
         ADMIN_ID,
         f"🔔 *Payment Verification Required!*\n\nUser: {user.first_name}\nChannel: {ch_data['name']}\nPlan: {mins} Mins\nPrice: ₹{price}",
         reply_markup=markup,
         parse_mode="Markdown"
     )
-    
     u_markup = InlineKeyboardMarkup().add(
         InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{ch_data['contact_username']}")
     )
@@ -203,18 +191,14 @@ def admin_notify(call):
 def approve_now(call):
     _, u_id, ch_id, mins = call.data.split('_')
     u_id, ch_id, mins = int(u_id), int(ch_id), int(mins)
-    
     try:
         expiry_datetime = datetime.now() + timedelta(minutes=mins)
         expiry_ts = int(expiry_datetime.timestamp())
-
         link = bot.create_chat_invite_link(ch_id, member_limit=1, expire_date=expiry_ts)
-        
         users_col.update_one(
             {"user_id": u_id, "channel_id": ch_id},
             {"$set": {"expiry": expiry_datetime.timestamp()}},
             upsert=True
         )
-        
         bot.send_message(
-            u_id
+           
